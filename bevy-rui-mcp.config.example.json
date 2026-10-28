@@ -1,0 +1,8 @@
+{
+  "ruiPath": "/path/to/bevy_rui",
+  "projectRoot": "/path/to/your/game_project",
+  "dataDir": "~/.cache/bevy-rui-mcp/data",
+  "version": "0.1.7",
+  "repo": "prfiredragon/bevy_rui_mcp",
+  "maxResults": 10
+}

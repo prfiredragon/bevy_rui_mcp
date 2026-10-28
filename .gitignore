@@ -1,0 +1,5 @@
+/target
+/dist
+/data
+*.tar.gz
+bevy-rui-mcp.config.json
