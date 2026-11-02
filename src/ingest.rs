@@ -91,12 +91,8 @@ fn extract_derives(attrs: &[Attribute]) -> Vec<String> {
     out
 }
 
-/// True when a struct/enum record for `name` was already emitted, i.e. the type is part of the
-/// public API surface and can carry a `default_impl` snippet.
-fn has_type_record(records: &[RuiRecord], name: &str) -> bool {
-    records.iter().any(|r| (r.kind == "struct" || r.kind == "enum") && r.name == name)
-}
-
+// The attach pass below restricts `default_impl`/`impl_traits` to struct/enum/trait records, so no
+// separate "does this type have a record?" scan is needed here (it was O(n^2) per impl).
 fn is_pub(vis: &Visibility) -> bool {
     matches!(vis, Visibility::Public(_))
 }

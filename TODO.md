@@ -27,8 +27,9 @@ the original list:
   `bevy-rui-mcp.config.json` (machine-absolute paths) stays ignored.
 
 ## 0. `src/ingest.rs` doesn't compile — DONE
-- [x] Fixed the 10 listed sites + 3 follow-on errors. Only warning left: unused
-  `has_type_record` in `make_type_record`.
+- [x] Fixed the 10 listed sites + 3 follow-on errors; `cargo build --release` is now warning-free
+      (the dead `has_type_record` helper was removed: the attach pass already restricts
+      `default_impl`/`impl_traits` to struct/enum/trait records).
 
 ## 1. `cache_version` gate would orphan every published bundle — DONE
 - [x] `src/types.rs:22` documents accept+migrate semantics; `load_index_from_disk` accepts
@@ -97,7 +98,7 @@ explicit (source tree beats installed index); no author path involved.
 Every step below ran against the real `bevy_rui` 0.1.7 checkout, then against a fresh data dir with
 **no `bevy_rui` source tree anywhere**:
 
-1. `cargo build --release` clean (single dead-code warning).
+1. `cargo build --release` clean, warning-free.
 2. `build-index --rui-path <local bevy_rui checkout>` -> 262 records / 24 widgets.
 3. `publish-index --out dist` -> `bevy-rui-index-0.1.7.tar.gz` (55,637 B) + `index-manifest.json`
    (sha256 `d9b7af96...`, `cache_version: 2`).
@@ -122,7 +123,6 @@ Every step below ran against the real `bevy_rui` 0.1.7 checkout, then against a 
 - [ ] Add a test layer: unit tests for the fallback chain (checkout present / absent / sibling dir),
       cache_version migration, and `widget_from` provenance; an idempotent `test.sh`.
 - [ ] `rui_search` over `widget_from` + `role` could rank trait-extension impls higher (low priority).
-- [ ] `src/ingest.rs` still has `has_type_record` dead-code warning; remove or use it.
 - [ ] Consider a `rebuild-index` convenience that fetches a bundle, then re-expands `widget_from`
       once a checkout exists, without re-scraping (low priority).
 - [ ] `data/` committed at v0.1.7 only; add a GC/rotation note if more versions accumulate.
