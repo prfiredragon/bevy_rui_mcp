@@ -16,7 +16,7 @@ the original list:
   Option-vs-String, E0502 nested borrow in the `collect()`); all fixed.
 - `cache_version` is **2**; `dist/index-manifest.json` published `1` with **219** records. The loader
   now *accepts and migrates* older bundles instead of rejecting them.
-- The hardcoded author path (`.../Stratus_Leap_Game/bevy_rui`) existed in **three layers**:
+- The hardcoded author path (the previous author's game-project checkout) existed in **three layers**:
   `src/config.rs`, `data/registry.json`, `data/versions/<v>/meta.json`. Removal required
   **persisting no `rui_path` at all** (it is a transient, in-memory-only field), plus a new
   version fallback that reads the installed prebuilt index.
@@ -92,6 +92,28 @@ and `dist/` are tracked and why `rui_path` is never persisted/shipped.
 `persisted_index_version()` reads `<data_dir>/registry.json` → `data/versions/<v>/meta.json` and picks
 the numerically newest dotted version whose records actually exist on disk. Resolution order is now
 explicit (source tree beats installed index); no author path involved.
+
+## Verification actually performed (2026-02-20)
+Every step below ran against the real `bevy_rui` 0.1.7 checkout, then against a fresh data dir with
+**no `bevy_rui` source tree anywhere**:
+
+1. `cargo build --release` clean (single dead-code warning).
+2. `build-index --rui-path <local bevy_rui checkout>` -> 262 records / 24 widgets.
+3. `publish-index --out dist` -> `bevy-rui-index-0.1.7.tar.gz` (55,637 B) + `index-manifest.json`
+   (sha256 `d9b7af96...`, `cache_version: 2`).
+4. `fetch-index --repo <author's game project>` (the GitHub Release asset of this repo) ->
+   `Already up to date (sha256 match)`.
+5. `fetch-index --from dist/bevy-rui-index-0.1.7.tar.gz` into a *fresh* data dir -> installed;
+   `status`/`serve` then work with only `--data-dir`.
+6. `status` reports `rui_version 0.1.7 (installed prebuilt index (<data_dir>/versions))`,
+   `index schema v2`, `index source prebuilt: no bevy_rui source tree present or required`.
+7. A JSON-RPC probe from an **unrelated cwd** exercised `initialize`, `tools/list`, all 6 tools
+   (`rui_widget` guide + catalog, `rui_api`, `rui_search`, `rui_examples`, `rui_theme`, `rui_status`),
+   `resources/list` (34 resources: catalog + 24 `rui://widget/{name}` + 9 `rui://example/{name}`)
+   and `resources/read` for catalog/widget/example/symbol URIs — no errors, no placeholders.
+8. A published **v1** bundle (219 records, 25 widgets) was installed into a fresh data dir and
+   migrated cleanly (`index schema v2 (migrated in memory from v1: ...)`) instead of erroring.
+9. `git grep Stratus` over the tracked tree (including `data/` and `dist/`): **no matches**.
 
 ## Outstanding (discovered while implementing, not in the original list)
 - [ ] Upload `dist/bevy-rui-index-0.1.7.tar.gz` + `dist/index-manifest.json` as assets of a GitHub

@@ -37,7 +37,7 @@ association: `widget_from` distribution is only `{None: 110, path: 152}`, and
 `RuiBuilderExt::vbox`, `::hbox`, `::window`, `::menu_bar`, `::multiline_textbox` all have
 `widget: null`. So the feature is genuinely unverified in the shipped data — item 1 stands.
 
-Rebuilding in the scratch copy from `/home/robert/rdev/Stratus_Leap_Game/bevy_rui` gives:
+Rebuilding in the scratch copy from `<the previous author's local bevy_rui checkout>` gives:
 
 ```
 records=262  widgets=24  cache_version=2  symbols=910
@@ -87,7 +87,7 @@ persisted registry/`versions/*` dir is never consulted for the version. Nothing 
 
 Caveat on the "already confirmed working" claim: source-free is only true while the process's cwd and
 its executable's ancestors are **outside** `/home/robert/rdev`. Run from inside that tree, discovery
-reattaches `/home/robert/rdev/Stratus_Leap_Game/bevy_rui` (see item 4) — so the claim is
+reattaches `<the previous author's local bevy_rui checkout>` (see item 4) — so the claim is
 "working in a neutral location", not "independent of the source tree".
 
 ---
@@ -122,9 +122,9 @@ Facts the TODO does not state:
 
 ## Item 4 — hard-coded author layout → ✅ validated
 
-`src/config.rs` occurrences of `Stratus_Leap_Game`: **lines 332, 335, 340** (plus a comment at 285).
+`src/config.rs` occurrences of `<author's game project>`: **lines 332, 335, 340** (plus a comment at 285).
 Empirically, running the binary from a scratch cwd reattached
-`/home/robert/rdev/Stratus_Leap_Game/bevy_rui`; the persisted index metadata itself records the
+`<the previous author's local bevy_rui checkout>`; the persisted index metadata itself records the
 author path (`registry.json` → `rui_path`, `meta.json` → `rui_path`), so a downloaded bundle carries
 that path into the user's status output. Precedence today (config.rs:252 → resolve_config):
 CLI > `BEVY_RUI_*` env > config file > `Cargo.toml`/`Cargo.lock` path dep > sibling `bevy_rui`/`../bevy_rui`
