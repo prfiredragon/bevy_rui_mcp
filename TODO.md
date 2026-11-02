@@ -113,7 +113,7 @@ Every step below ran against the real `bevy_rui` 0.1.7 checkout, then against a 
    and `resources/read` for catalog/widget/example/symbol URIs — no errors, no placeholders.
 8. A published **v1** bundle (219 records, 25 widgets) was installed into a fresh data dir and
    migrated cleanly (`index schema v2 (migrated in memory from v1: ...)`) instead of erroring.
-9. `git grep Stratus` over the tracked tree (including `data/` and `dist/`): **no matches**.
+9. `git grep` for the old author path over the tracked tree (including `data/` and `dist/`): **no matches**.
 
 ## Outstanding (discovered while implementing, not in the original list)
 - [ ] Upload `dist/bevy-rui-index-0.1.7.tar.gz` + `dist/index-manifest.json` as assets of a GitHub
