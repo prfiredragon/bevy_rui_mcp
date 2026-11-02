@@ -1,5 +1,17 @@
 /target
-/dist
-/data
-*.tar.gz
+
+# Local, machine-specific config (absolute paths): never commit.
 bevy-rui-mcp.config.json
+
+# Temporary normalized meta staged inside dist/ while packing a bundle (removed afterwards).
+dist/.bevy-rui-index-meta-dist.json
+
+# Index bundles and the persisted index are intentionally TRACKED: `dist/bevy-rui-index-<version>.tar.gz`
+# plus `dist/index-manifest.json` are the artifacts published as GitHub Releases and read by `fetch-index`,
+# and `data/` is the persisted index that ships in-tree so `serve` works with no `bevy_rui` source checkout
+# and no config file — a consumer needs only the `bevy_rui` package *name* and *version*. The persisted
+# `meta.json`/`registry.json` and the bundled copy carry no source path (`rui_path` is cleared on write),
+# so no author-specific absolute path is ever shipped. See README "Using a prebuilt index" for the flow.
+# Any other `*.tar.gz` (scratch archives, vendored tarballs) stays out of the repo.
+*.tar.gz
+!dist/bevy-rui-index-*.tar.gz

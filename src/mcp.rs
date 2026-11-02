@@ -3,6 +3,7 @@
 use crate::config::ResolvedConfig;
 use crate::store::{load_or_build_index, RuiIndex};
 use crate::tools::{format_record_detailed, handle_tool_call, tool_definitions};
+use crate::tools::{MAX_CODE_BYTES_CAP};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
@@ -64,6 +65,11 @@ pub fn run_mcp_stdio(mut cfg: ResolvedConfig, force: bool) -> Result<(), String>
                     .get("protocolVersion")
                     .and_then(|v| v.as_str())
                     .unwrap_or("2024-11-05");
+                let widget_scope = if let Some(i) = &index {
+                    format!("all {} `bevy_rui` widgets", i.meta.widgets.len())
+                } else {
+                    "every indexed widget (the index could not be loaded at startup)".to_string()
+                };
                 json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -77,7 +83,9 @@ pub fn run_mcp_stdio(mut cfg: ResolvedConfig, force: bool) -> Result<(), String>
                             "name": "bevy_rui_mcp",
                             "version": env!("CARGO_PKG_VERSION")
                         },
-                        "instructions": "MCP server exclusively for `bevy_rui` (Retained UI widget crate for Bevy 0.20). Use `rui_widget` to inspect any of the 21 widgets, `rui_api` for exact symbol signatures and `Default` implementations, `rui_search` for hybrid search, `rui_examples` for runnable example code, and `rui_theme` for `RuiTheme` / `RuiThemeElement` styling."
+                        "instructions": format!(
+                            "MCP server exclusively for `bevy_rui` (Retained UI widget crate for Bevy 0.20), serving either an index built from a local checkout or a prebuilt index downloaded from GitHub Releases. Use `rui_widget` to inspect {widget_scope}, `rui_api` for exact symbol signatures and `Default` implementations, `rui_search` for hybrid search, `rui_examples` for runnable example code, and `rui_theme` for `RuiTheme` / `RuiThemeElement` styling. `rui_status` reports where the index came from.",
+                        )
                     }
                 })
             }
@@ -92,7 +100,7 @@ pub fn run_mcp_stdio(mut cfg: ResolvedConfig, force: bool) -> Result<(), String>
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "tools": tool_definitions()
+                    "tools": tool_definitions(index.as_ref())
                 }
             }),
 
@@ -192,9 +200,11 @@ pub fn run_mcp_stdio(mut cfg: ResolvedConfig, force: bool) -> Result<(), String>
                     t
                 } else if let Some(sym) = uri.strip_prefix("rui://symbol/") {
                     if let Some(idx) = &index {
+                        // Resource reads advertise no `max_bytes` argument, so give them the widest
+                        // window the tools allow; the header still names any spill-over offset.
                         idx.lookup_symbol(sym)
                             .into_iter()
-                            .map(|r| format_record_detailed(r, true))
+                            .map(|r| format_record_detailed(r, true, MAX_CODE_BYTES_CAP, 0))
                             .collect::<Vec<_>>()
                             .join("\n---\n")
                     } else {

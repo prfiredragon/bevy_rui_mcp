@@ -5,11 +5,15 @@
 //! 2. Environment variables (`BEVY_RUI_PATH`, `BEVY_RUI_PROJECT_ROOT`, `BEVY_RUI_DATA_DIR`, `BEVY_RUI_VERSION`, `BEVY_RUI_REPO`)
 //! 3. Config file (`bevy-rui-mcp.config.json` in project root, executable directory, or `~/.config/bevy-rui-mcp/config.json`)
 //! 4. Automatic Cargo workspace / dependency discovery (`Cargo.toml` / `Cargo.lock` path or version dependencies, or sibling `../bevy_rui` directories).
+//! 5. An installed prebuilt index under `<data_dir>/versions` (a source-free setup — one that only
+//!    downloaded a bundle from GitHub Releases — needs the `bevy_rui` package *name* and *version*,
+//!    never a source tree, a config file, or a location hardcoded for one developer's machine).
 
 use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use crate::store::{read_registry, version_dir};
 
 #[derive(Debug, Default, Clone)]
 pub struct CliOverrides {
@@ -249,6 +253,34 @@ fn load_config_file(project_root: &Path) -> (Option<PathBuf>, ConfigFile) {
     (None, ConfigFile::default())
 }
 
+/// Newest `bevy_rui` version already installed as a persisted index under `<data_dir>/versions/*`.
+///
+/// Last-resort version resolution, so a source-free setup (bundle downloaded from a GitHub Release,
+/// with no `bevy_rui` checkout, no config file, no Cargo dependency) still knows which `bevy_rui`
+/// version it is serving: only the package name — implied by this MCP — plus the installed version
+/// are needed. Picks the numerically newest dotted version whose index files actually exist, rather
+/// than the lexicographically last registry key (which would rank `0.1.10` below `0.1.7`).
+pub fn persisted_index_version(data_dir: &Path) -> Option<String> {
+    let reg = read_registry(data_dir);
+    let mut best: Option<String> = None;
+    let mut best_key: Vec<u64> = vec![];
+    for (ver, _) in reg.versions.iter() {
+        let vdir = version_dir(data_dir, &ver);
+        if !vdir.join("records.ndjson").is_file() || !vdir.join("meta.json").is_file() {
+            continue;
+        }
+        let mut key: Vec<u64> = vec![];
+        for part in ver.split(".") {
+            key.push(part.parse::<u64>().unwrap_or(0));
+        }
+        if best.is_none() || key > best_key {
+            best = Some(ver.clone());
+            best_key = key;
+        }
+    }
+    best
+}
+
 pub fn resolve_config(overrides: &CliOverrides) -> ResolvedConfig {
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let initial_root = overrides
@@ -282,7 +314,9 @@ pub fn resolve_config(overrides: &CliOverrides) -> ResolvedConfig {
     // 2. BEVY_RUI_PATH env var
     // 3. config file `ruiPath`
     // 4. Cargo.toml path dependency / current dir if it is bevy_rui
-    // 5. Common relative/sibling locations (`./bevy_rui`, `../bevy_rui`, `../Stratus_Leap_Game/bevy_rui`)
+    // 5. Generic sibling/ancestor locations named `bevy_rui` (`./bevy_rui`, `../bevy_rui`, `../../bevy_rui`,
+    //    and the same shapes around the cwd and the executable's ancestors). Discovery is name-based
+    //    only: no author-specific checkout location is encoded here.
     let mut rui_path: Option<PathBuf> = None;
     let mut rui_path_source = "not found (using prebuilt index if installed)".to_string();
 
@@ -329,15 +363,15 @@ pub fn resolve_config(overrides: &CliOverrides) -> ResolvedConfig {
             project_root.clone(),
             project_root.join("bevy_rui"),
             project_root.join("..").join("bevy_rui"),
-            project_root.join("..").join("Stratus_Leap_Game").join("bevy_rui"),
+            project_root.join("..").join("..").join("bevy_rui"),
             cwd.join("bevy_rui"),
             cwd.join("..").join("bevy_rui"),
-            cwd.join("..").join("Stratus_Leap_Game").join("bevy_rui"),
+            cwd.join("..").join("..").join("bevy_rui"),
         ];
         if let Ok(exe) = env::current_exe() {
             for ancestor in exe.ancestors().skip(1).take(4) {
                 sibling_candidates.push(ancestor.join("bevy_rui"));
-                sibling_candidates.push(ancestor.join("Stratus_Leap_Game").join("bevy_rui"));
+                sibling_candidates.push(ancestor.join("..").join("bevy_rui"));
             }
         }
         for cand in sibling_candidates {
@@ -354,20 +388,9 @@ pub fn resolve_config(overrides: &CliOverrides) -> ResolvedConfig {
         .map(read_rui_manifest_info)
         .unwrap_or((None, None));
 
-    // Resolve version
-    let (rui_version, version_source) = if let Some(v) = &overrides.version {
-        (v.clone(), "--version CLI flag".to_string())
-    } else if let Ok(v) = env::var("BEVY_RUI_VERSION") {
-        (v, "BEVY_RUI_VERSION env var".to_string())
-    } else if let Some(v) = &file_cfg.version {
-        (v.clone(), "config file".to_string())
-    } else if let Some(v) = manifest_rui_ver {
-        (v, "bevy_rui/Cargo.toml".to_string())
-    } else if let Some(v) = cargo_rui_ver {
-        (v, cargo_source.unwrap_or_else(|| "Cargo.toml".to_string()))
-    } else {
-        (env!("CARGO_PKG_VERSION").to_string(), "default package version".to_string())
-    };
+    // Version is resolved *after* `data_dir` (below): a source-free setup, which has no checkout and
+    // no config file to read, derives the `bevy_rui` version from the prebuilt index installed under
+    // `<data_dir>/versions` instead of silently claiming this MCP's own package version.
 
     // Resolve data_dir
     let data_dir = overrides
@@ -390,6 +413,22 @@ pub fn resolve_config(overrides: &CliOverrides) -> ResolvedConfig {
                 project_root.join(".bevy-rui-mcp-data")
             }
         });
+
+    let (rui_version, version_source) = if let Some(v) = &overrides.version {
+        (v.clone(), "--version CLI flag".to_string())
+    } else if let Ok(v) = env::var("BEVY_RUI_VERSION") {
+        (v, "BEVY_RUI_VERSION env var".to_string())
+    } else if let Some(v) = &file_cfg.version {
+        (v.clone(), "config file".to_string())
+    } else if let Some(v) = manifest_rui_ver {
+        (v, "bevy_rui/Cargo.toml".to_string())
+    } else if let Some(v) = cargo_rui_ver {
+        (v, cargo_source.unwrap_or_else(|| "Cargo.toml".to_string()))
+    } else if let Some(v) = persisted_index_version(&data_dir) {
+        (v.clone(), "installed prebuilt index (<data_dir>/versions)".to_string())
+    } else {
+        (env!("CARGO_PKG_VERSION").to_string(), "default package version".to_string())
+    };
 
     let repo = overrides
         .repo

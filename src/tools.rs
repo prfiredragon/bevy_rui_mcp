@@ -6,8 +6,82 @@ use crate::types::RuiRecord;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
+/// Schema fragment for the `kind` filter parameter. `kinds` already includes the `all` sentinel.
+fn kind_prop(kinds: Vec<String>) -> Value {
+    json!({
+        "type": "string",
+        "enum": kinds,
+        "description": "Optional kind filter (`all` = no filter). Only the kinds listed are indexed.",
+    })
+}
+
+/// The closed set of record kinds the indexer can produce, plus the `all` sentinel. Used as a fallback
+/// when no index is loaded yet (so the schema still describes the valid vocabulary).
+fn default_kinds() -> Vec<String> {
+    let names: Vec<&str> = vec![
+        "all", "enum", "example", "fn", "guide", "method", "module", "struct", "trait", "trait_method",
+    ];
+    names.iter().map(|name| name.to_string()).collect()
+}
+
+/// Schema fragment for the `widget` filter parameter.
+/// Enumerates the widget names present in the loaded index; falls back to prose when the index has
+/// not been built yet (an empty enum would reject every input). `accept_list` adds the `list` sentinel.
+fn widget_prop(widgets: &[String], accept_list: bool) -> Value {
+    let mut allowed: Vec<String> = widgets.iter().map(|w| w.clone()).collect();
+    if accept_list {
+        allowed.push("list".to_string());
+    }
+    if widgets.is_empty() {
+        json!({
+            "type": "string",
+            "description": "Optional widget name (run `rui_widget` with no arguments to list indexed widgets).",
+        })
+    } else {
+        json!({
+            "type": "string",
+            "enum": allowed,
+            "description": "Widget name; only the names listed are indexed, so any other value matches no record.",
+        })
+    }
+}
+
 /// Returns the JSON Schema definitions for all MCP tools exposed by `bevy_rui_mcp`.
-pub fn tool_definitions() -> Value {
+/// `kind`/`widget` filters carry enum constraints: `kind` from the closed set of record kinds the
+/// indexer can produce, `widget` from the widget names actually present in the loaded index (when
+/// available). This stops agents from inventing filter values that silently match nothing.
+pub fn tool_definitions(idx: Option<&RuiIndex>) -> Value {
+    // The kinds the indexer can produce. When an index is loaded, take the set actually observed in
+    // this index so the enum never advertises a kind that matches no record; `all` stays as the
+    // no-filter sentinel either way.
+    let kinds: Vec<String> = if let Some(i) = &idx {
+        let observed: Vec<String> = i.valid_kinds();
+        if observed.is_empty() {
+            default_kinds()
+        } else {
+            let mut with_all: Vec<String> = vec!["all".to_string()];
+            with_all.extend(observed);
+            with_all
+        }
+    } else {
+        default_kinds()
+    };
+    let widgets: Vec<String> = if let Some(i) = &idx {
+        i.meta.widgets.clone()
+    } else {
+        Vec::new()
+    };
+
+    let widget_count = widgets.len();
+    let widget_guide_desc = if widget_count > 0usize {
+        format!(
+            "Complete reference guide for a `bevy_rui` widget (or list all {} widgets if `widget` is omitted). Returns `RuiBuilderExt` builder methods, `spawn_*` functions, state components, systems, and usage examples.",
+            widget_count
+        )
+    } else {
+        "Complete reference guide for a `bevy_rui` widget (lists every indexed widget when `widget` is omitted). Returns `RuiBuilderExt` builder methods, `spawn_*` functions, state components, systems, and usage examples.".to_string()
+    };
+
     json!([
         {
             "name": "rui_search",
@@ -19,14 +93,8 @@ pub fn tool_definitions() -> Value {
                         "type": "string",
                         "description": "Search query (symbol name like `spawn_button` or concept like `split dock panel` or `file dialog filter`)."
                     },
-                    "kind": {
-                        "type": "string",
-                        "description": "Optional kind filter: `all` (default), `struct`, `enum`, `fn`, `trait`, `trait_method`, `method`, `module`, `example`."
-                    },
-                    "widget": {
-                        "type": "string",
-                        "description": "Optional widget filter (e.g. `button`, `docks`, `code_editor`, `file_dialog`, `tabs`, `menu`, `windows`)."
-                    },
+                    "kind": kind_prop(kinds),
+                    "widget": widget_prop(&widgets, false),
                     "limit": {
                         "type": "integer",
                         "description": "Max results to return (1..=25, default 10)."
@@ -37,7 +105,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "rui_api",
-            "description": "Exact symbol lookup for any `bevy_rui` struct, enum, function (`spawn_*`), trait (`RuiBuilderExt`), or method. Returns signature, fields/variants, `Default` implementation, documentation, and spawn code.",
+            "description": "Exact symbol lookup for any `bevy_rui` struct, enum, function (`spawn_*`), trait (`RuiBuilderExt`), or method. Returns signature, fields/variants, `Default` implementation, documentation, and spawn code. Mistyped symbols return `Did you mean` suggestions instead of an empty result.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -48,6 +116,18 @@ pub fn tool_definitions() -> Value {
                     "include_code": {
                         "type": "boolean",
                         "description": "Include full `spawn_*` implementation body if available (default true)."
+                    },
+                    "include_related": {
+                        "type": "boolean",
+                        "description": "Also return closely related records: the owner type's other methods, siblings in the same module/widget, records that reference this symbol, and records whose docs link to it (default false)."
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "description": "Max bytes of stored `code` to include (1..=20000, default 4000)."
+                    },
+                    "code_offset": {
+                        "type": "integer",
+                        "description": "Byte offset into the record's stored `code` to start at (default 0)."
                     }
                 },
                 "required": ["symbol"]
@@ -55,14 +135,11 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "rui_widget",
-            "description": "Complete reference guide for a `bevy_rui` widget (or list of all 21 widgets if `widget` is omitted). Returns `RuiBuilderExt` builder methods, `spawn_*` functions, state components, systems, and usage examples.",
+            "description": widget_guide_desc,
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "widget": {
-                        "type": "string",
-                        "description": "Widget name (e.g. `accordion`, `button`, `canvas_layer`, `checkbox`, `clipboard`, `code_editor`, `color_picker`, `context_menu`, `docks`, `dropdown`, `file_dialog`, `label`, `layout`, `menu`, `progress_bar`, `resizer`, `scrollview`, `slider`, `tabs`, `textbox`, `tooltip`, `viewport`, `windows`). Omit or pass `list` to list all widgets."
-                    }
+                    "widget": widget_prop(&widgets, true)
                 }
             }
         },
@@ -76,9 +153,14 @@ pub fn tool_definitions() -> Value {
                         "type": "string",
                         "description": "Exact example name (e.g. `layout_dock`, `layout_dock_save`, `layout_dock_scroll`, `layout_test`, `game_test`, `code_editor_demo`, `file_dialog_test`, `platformer_hud`)."
                     },
-                    "widget": {
-                        "type": "string",
-                        "description": "Filter examples that demonstrate a specific widget (e.g. `docks`, `code_editor`, `file_dialog`, `menu`)."
+                    "widget": widget_prop(&widgets, false),
+                    "max_bytes": {
+                        "type": "integer",
+                        "description": "Max bytes of example source to return when `name` is given (1..=20000, default 4000)."
+                    },
+                    "code_offset": {
+                        "type": "integer",
+                        "description": "Byte offset into the example source to start at (default 0)."
                     }
                 }
             }
@@ -116,7 +198,12 @@ pub fn tool_definitions() -> Value {
     ])
 }
 
-pub fn format_record_detailed(r: &RuiRecord, include_code: bool) -> String {
+pub fn format_record_detailed(
+    r: &RuiRecord,
+    include_code: bool,
+    max_bytes: usize,
+    code_offset: usize,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "### `{}` ({})\n",
@@ -127,10 +214,42 @@ pub fn format_record_detailed(r: &RuiRecord, include_code: bool) -> String {
         r.file, r.line, r.version
     ));
     if let Some(w) = &r.widget {
-        out.push_str(&format!("- **Widget:** `{w}`\n"));
+        let from = if let Some(f) = &r.widget_from {
+            widget_provenance(f.to_string())
+        } else {
+            "provenance not recorded".to_string()
+        };
+        out.push_str(&format!("- **Widget:** `{w}` ({from})\n"));
+    }
+    if !r.implements.is_empty() {
+        out.push_str(&format!(
+            "- **Implements:** `{}`\n",
+            r.implements.join("`, `")
+        ));
     }
     if !r.derives.is_empty() {
         out.push_str(&format!("- **Derives:** `{}`\n", r.derives.join(", ")));
+    }
+    if r.code_start_line > 0 && r.code_end_line > 0 {
+        let span = r.code_end_line.saturating_sub(r.code_start_line) + 1;
+        let detail = if r.code.is_some() {
+            format!("{span} lines stored as `code`")
+        } else {
+            format!("{span} lines; body not stored")
+        };
+        out.push_str(&format!(
+            "- **Code range:** `{}:{}..{}` ({})\n",
+            r.file, r.code_start_line, r.code_end_line, detail
+        ));
+    }
+    if !r.example_source.is_empty() {
+        out.push_str(&format!("- **Example source:** `{}.rs`\n", r.example_source));
+    }
+    if !r.doc_links.is_empty() {
+        out.push_str(&format!(
+            "- **Doc links ({}):** `{}`\n",
+            r.doc_links.len(), r.doc_links.join("`, `")
+        ));
     }
     out.push_str(&format!("\n```rust\n{}\n```\n", r.signature));
 
@@ -169,11 +288,113 @@ pub fn format_record_detailed(r: &RuiRecord, include_code: bool) -> String {
 
     if include_code {
         if let Some(code) = &r.code {
-            out.push_str(&format!("\n**Source Implementation:**\n```rust\n{code}\n```\n"));
+            out.push_str(&format_code_window(
+                "Source Implementation",
+                code,
+                max_bytes,
+                code_offset,
+                r.code_start_line,
+                r.code_end_line,
+            ));
         }
     }
 
     out
+}
+
+/// Default byte cap for stored code when a caller does not pass `max_bytes`.
+const DEFAULT_MAX_CODE_BYTES: usize = 4000;
+/// Upper bound on `max_bytes` a tool call may ask for, so a long `spawn_*` body still fits one
+/// MCP response at the widest setting while smaller windows stay paginable.
+pub const MAX_CODE_BYTES_CAP: usize = 20000;
+
+/// Renders one paginated window of a record's stored `code`, always naming the exact slice the
+/// reader got plus the byte offset needed for the next window. The indexer never truncates `code`,
+/// so pagination is the only place a caller can lose part of a body: reporting the offsets makes
+/// that recoverable instead of silently partial. `code_start_line`/`code_end_line` let the reader
+/// line up the window with the checkout on disk.
+fn format_code_window(
+    label: &str,
+    code: &str,
+    max_bytes: usize,
+    code_offset: usize,
+    start_line: usize,
+    end_line: usize,
+) -> String {
+    let cap: usize = if max_bytes == 0 { DEFAULT_MAX_CODE_BYTES } else { max_bytes };
+    if code_offset >= code.len() {
+        return format!(
+            "\n**{}:** nothing at `code_offset: {}`; `code` is {} bytes, valid offsets are 0..{}.\n",
+            label, code_offset, code.len(), code.len().saturating_sub(1)
+        );
+    }
+    // Never split a UTF-8 sequence: walk the byte cursor over char boundaries.
+    let mut end: usize = (code_offset + cap).min(code.len());
+    while end > code_offset && !code.is_char_boundary(end) {
+        end -= 1;
+    }
+    let window = &code[code_offset..end];
+    let lines = window.lines().count();
+    // Report the exact byte window, the total size, and the next offset when a body does not fit
+    // in one message. A caller that wants a whole `spawn_*` body walks these windows to completion
+    // instead of receiving a silently truncated snippet.
+    let head = if end >= code.len() {
+        format!(
+            "bytes {}..{}/{} of `code`, complete ({} lines)", code_offset, end, code.len(), lines
+        )
+    } else {
+        format!(
+            "bytes {}..{}/{} of `code` ({} lines shown)", code_offset, end, code.len(), lines
+        )
+    };
+    let range = if start_line > 0 && end_line > 0 {
+        format!(" | source lines `{start_line}..{end_line}`")
+    } else {
+        "".to_string()
+    };
+    let more = if end < code.len() {
+        format!("\nMore remains: call again with `code_offset: {}`.", end)
+    } else {
+        " End of `code`.".to_string()
+    };
+    format!(
+        "\n**{}:** {}{}\n```rust\n{}\n```\n{}",
+        label, head, range, window, more
+    )
+}
+
+/// Human-readable provenance for `widget_from`: how the indexer associated a record with a widget,
+/// so an agent can tell a widget-tagged record was seen under `src/widgets/` rather than guessed.
+fn widget_provenance(from: String) -> String {
+    match from.as_str() {
+        "path" => "declared under `src/widgets/<widget>.rs`".to_string(),
+        "owner" => "owner type belongs to this widget".to_string(),
+        "name" => "builder/spawn method named after the widget".to_string(),
+        "reexport" => "brought into scope by a `pub use`".to_string(),
+        // Emitted by the current indexer for associations derived from source structure rather than
+        // the file path, both added when `rui_root`/`vbox`/`window` builders live outside `src/widgets/`.
+        "doc_link" => "named by the item's own `/// See [`<widget>::spawn_...`]` doc links".to_string(),
+        "decl_trait" => "inherited from the trait that declares this method".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Reads the `max_bytes`/`code_offset` code-pagination arguments shared by the tools that return
+/// stored source. Defaults to `DEFAULT_MAX_CODE_BYTES` and offset 0; both are clamped so a caller
+/// cannot ask for an unbounded window that swamps the MCP response.
+fn code_paging_args(args: &Value) -> (usize, usize) {
+    let max_bytes: usize = args
+        .get("max_bytes")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(DEFAULT_MAX_CODE_BYTES)
+        .clamp(1, MAX_CODE_BYTES_CAP);
+    let code_offset: usize = args
+        .get("code_offset")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(0);
+    (max_bytes, code_offset)
 }
 
 /// Dispatches a tool call and returns `(markdown_text, is_error)`.
@@ -215,11 +436,22 @@ pub fn handle_tool_call(
 
             let hits = idx.search(query, kind, widget, limit);
             if hits.is_empty() {
+                let suggestions: Vec<String> = idx.suggest_symbols(query, 8usize);
+                if suggestions.is_empty() {
+                    return (
+                        format!(
+                            "No results found in `bevy_rui {}` for query `{query}`.\nAvailable widgets: `{}`",
+                            idx.meta.rui_version,
+                            idx.meta.widgets.join("`, `")
+                        ),
+                        false,
+                    );
+                }
                 return (
                     format!(
-                        "No results found in `bevy_rui {}` for query `{query}`.\nAvailable widgets: `{}`",
+                        "No results found in `bevy_rui {}` for query `{query}`.\nDid you mean: `{}`\n",
                         idx.meta.rui_version,
-                        idx.meta.widgets.join("`, `")
+                        suggestions.join("`, `")
                     ),
                     false,
                 );
@@ -233,9 +465,20 @@ pub fn handle_tool_call(
             for hit in hits {
                 let r = hit.record;
                 out.push_str(&format!(
-                    "- **`{}`** (`{}`) — `{}:{}`\n",
-                    r.full_path, r.kind, r.file, r.line
+                    "- **`{}`** (`{}`) score `{:.1}` via `{}` — `{}:{}`\n",
+                    r.full_path,
+                    r.kind,
+                    hit.score,
+                    hit.reason,
+                    r.file,
+                    r.line
                 ));
+                if r.code_start_line > 0 && r.code_end_line > 0 {
+                    out.push_str(&format!(
+                        "  code `{}`..`{}`\n",
+                        r.code_start_line, r.code_end_line
+                    ));
+                }
                 out.push_str(&format!("  ```rust\n  {}\n  ```\n", r.signature));
                 if !r.docs.is_empty() {
                     let first_para = r.docs.lines().take(3).collect::<Vec<_>>().join(" ");
@@ -262,13 +505,30 @@ pub fn handle_tool_call(
                 .get("include_code")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
+            let include_related = args
+                .get("include_related")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let code_window: (usize, usize) = code_paging_args(args);
+            let (max_bytes, code_offset) = code_window;
 
             let matches = idx.lookup_symbol(symbol);
             if matches.is_empty() {
+                let suggestions: Vec<String> = idx.suggest_symbols(symbol, 8usize);
+                if suggestions.is_empty() {
+                    return (
+                        format!(
+                            "Symbol `{symbol}` not found in `bevy_rui {}`. Try `rui_search` with a keyword.",
+                            idx.meta.rui_version
+                        ),
+                        false,
+                    );
+                }
                 return (
                     format!(
-                        "Symbol `{symbol}` not found in `bevy_rui {}`. Try `rui_search` with a keyword.",
-                        idx.meta.rui_version
+                        "Symbol `{symbol}` not found in `bevy_rui {}`. Did you mean: `{}`\n",
+                        idx.meta.rui_version,
+                        suggestions.join("`, `")
                     ),
                     false,
                 );
@@ -278,9 +538,53 @@ pub fn handle_tool_call(
                 "## `bevy_rui {}` API Lookup: `{symbol}`\n\n",
                 idx.meta.rui_version
             );
-            for rec in matches {
-                out.push_str(&format_record_detailed(rec, include_code));
+            for rec in &matches {
+                out.push_str(&format_record_detailed(rec, include_code, max_bytes, code_offset));
                 out.push_str("\n---\n\n");
+            }
+            if include_related {
+                let mut related_lists: Vec<Vec<&RuiRecord>> = Vec::new();
+                for rec in &matches {
+                    let related = idx.related_records(rec, 8usize);
+                    related_lists.push(related);
+                }
+                out.push_str("### Related Records\n\n");
+                let n = matches.len();
+                for i in 0..n {
+                    if n > 1 {
+                        out.push_str(&format!("#### `{}`\n", matches[i].full_path));
+                    }
+                    for other in &related_lists[i] {
+                        out.push_str(&format!("- `{}` (`{}`) — `{}`\n", other.full_path, other.kind, other.signature));
+                    }
+                    out.push('\n');
+                }
+                // Backlink pass: records whose doc comments link to each matched symbol. Printed
+                // only when there is at least one edge so the section never claims an empty graph.
+                let backlink_lists: Vec<Vec<&RuiRecord>> = matches
+                    .iter()
+                    .map(|rec| idx.referencing_records(rec, 8usize))
+                    .collect();
+                let has_backlinks: bool = backlink_lists.iter().any(|l| !l.is_empty());
+                if has_backlinks {
+                    out.push_str("\n### Referenced By\n\n");
+                    for i in 0..n {
+                        if backlink_lists[i].is_empty() {
+                            continue;
+                        }
+                        // Name each group only when several symbols were asked about, so a
+                        // single-symbol lookup stays a flat list.
+                        if n > 1 {
+                            out.push_str(&format!("#### `{}`\n", matches[i].full_path));
+                        }
+                        for other in &backlink_lists[i] {
+                            out.push_str(
+                                &format!("- `{}` (`{}`) — `{}`\n", other.full_path, other.kind, other.signature)
+                            );
+                        }
+                        out.push('\n');
+                    }
+                }
             }
             (out, false)
         }
@@ -324,11 +628,17 @@ pub fn handle_tool_call(
 
             let recs = idx.widget_records(widget);
             if recs.is_empty() {
+                let suggestions: Vec<String> = idx.suggest_symbols(widget, 8usize);
+                let hint = if suggestions.is_empty() {
+                    idx.meta.widgets.join("`, `")
+                } else {
+                    suggestions.join("`, `")
+                };
                 return (
                     format!(
                         "Unknown widget `{widget}`. Available widgets in `bevy_rui {}`: `{}`",
                         idx.meta.rui_version,
-                        idx.meta.widgets.join("`, `")
+                        hint
                     ),
                     false,
                 );
@@ -338,8 +648,10 @@ pub fn handle_tool_call(
                 "## `bevy_rui {}` Widget Guide: `{widget}`\n\n",
                 idx.meta.rui_version
             );
+            // A widget guide lists every record in the widget, so code windows use the default cap:
+            // the header lines still name the byte range and the next offset when a body spills over.
             for rec in &recs {
-                out.push_str(&format_record_detailed(rec, true));
+                out.push_str(&format_record_detailed(rec, true, DEFAULT_MAX_CODE_BYTES, 0));
                 out.push('\n');
             }
 
@@ -378,12 +690,36 @@ pub fn handle_tool_call(
                     .iter()
                     .find(|r| r.kind == "example" && r.name.eq_ignore_ascii_case(clean))
                 {
+                    let (max_bytes, code_offset) = code_paging_args(args);
                     let mut out = format!(
-                        "## Example `{}` (`{}`)\n\n{}\n\n",
-                        ex.name, ex.file, ex.docs
+                        "## Example `{}` (`{}`)\n\n",
+                        ex.name, ex.file
                     );
+                    // Name the originating example file and the stored line range before the body so
+                    // a reader can find the same example in the checkout.
+                    if !ex.example_source.is_empty() {
+                        out.push_str(&format!("- **Example source:** `{}.rs`\n", ex.example_source));
+                    }
+                    if ex.code_start_line > 0 && ex.code_end_line > 0 {
+                        out.push_str(&format!(
+                            "- **Code range:** `{}:{}`..`{}`\n",
+                            ex.file, ex.code_start_line, ex.code_end_line
+                        ));
+                    }
+                    if !ex.docs.is_empty() {
+                        out.push_str(&format!("\n{}\n", ex.docs));
+                    }
                     if let Some(code) = &ex.code {
-                        out.push_str(&format!("```rust\n{code}\n```\n"));
+                        out.push_str(&format_code_window(
+                            "Example Source",
+                            code,
+                            max_bytes,
+                            code_offset,
+                            ex.code_start_line,
+                            ex.code_end_line,
+                        ));
+                    } else {
+                        out.push_str("\nSource code not stored for this example.\n");
                     }
                     return (out, false);
                 } else {
@@ -393,10 +729,16 @@ pub fn handle_tool_call(
                         .filter(|r| r.kind == "example")
                         .map(|r| r.name.as_str())
                         .collect();
+                    let suggestions: Vec<String> = idx.suggest_symbols(target_name, 6usize);
+                    let hint = if suggestions.is_empty() {
+                        available.join("`, `")
+                    } else {
+                        suggestions.join("`, `")
+                    };
                     return (
                         format!(
                             "Example `{target_name}` not found. Available examples: `{}`",
-                            available.join("`, `")
+                            hint
                         ),
                         false,
                     );
@@ -418,6 +760,14 @@ pub fn handle_tool_call(
                     widgets.join("`, `"),
                     ex.signature
                 ));
+                // Point back at the originating example file and the stored line range so the list
+                // is checkable against the checkout, not just a name dump.
+                if !ex.example_source.is_empty() {
+                    out.push_str(&format!("  - From `{}.rs`\n", ex.example_source));
+                }
+                if ex.code_start_line > 0 && ex.code_end_line > 0 {
+                    out.push_str(&format!("  - Code `{}..{}`\n", ex.code_start_line, ex.code_end_line));
+                }
             }
             out.push_str("\nPass `name: \"<example_name>\"` to `rui_examples` to view the full Rust source code.");
             (out, false)
@@ -455,7 +805,7 @@ pub fn handle_tool_call(
                         out.push('\n');
                     }
                 } else {
-                    out.push_str(&format_record_detailed(rec, false));
+                    out.push_str(&format_record_detailed(rec, false, DEFAULT_MAX_CODE_BYTES, 0));
                     out.push('\n');
                 }
             }
@@ -533,6 +883,16 @@ pub fn handle_tool_call(
                 out.push_str(&format!(
                     "- **Indexed Records:** `{}` (`{}` unique symbol keys)\n",
                     idx.meta.total_records, idx.meta.total_symbols
+                ));
+                // Graph counters: what the indexer actually extracted this schema. A zero here means
+                // ingest produced no such edges, which is distinguishable from "field not surfaced".
+                out.push_str(&format!(
+                    "- **Doc-link edges:** `{}` (reverse graph over `{}` linked symbols)\n",
+                    idx.meta.total_doc_links, idx.linked_by.len()
+                ));
+                out.push_str(&format!(
+                    "- **Implemented-trait edges:** `{}`\n",
+                    idx.meta.total_implements
                 ));
                 out.push_str(&format!(
                     "- **Widgets ({}):** `{}`\n",

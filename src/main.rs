@@ -12,9 +12,10 @@ pub mod types;
 
 use config::{expand_home, resolve_config, CliOverrides};
 use store::{
-    fetch_index_bundle, load_or_build_index, publish_index_bundle, read_registry,
+    fetch_index_bundle, load_index_from_disk, load_or_build_index, publish_index_bundle, read_registry,
     save_index_to_disk, version_dir,
 };
+use types::{CACHE_VERSION};
 use std::env;
 use std::path::PathBuf;
 use std::process;
@@ -242,6 +243,35 @@ fn main() {
             if !reg.versions.is_empty() {
                 let list: Vec<&str> = reg.versions.keys().map(|s| s.as_str()).collect();
                 println!("  installed vers : {}", list.join(", "));
+            }
+
+            // Schema + provenance of the persisted index: a bundle published by an older build of
+            // this MCP is accepted and migrated, and that origin is reported rather than hidden.
+            if has_persisted {
+                match load_index_from_disk(&cfg.data_dir, &cfg.rui_version) {
+                    Ok(loaded) => {
+                        let mut schema = format!("v{CACHE_VERSION}");
+                        if let Some(from) = &loaded.meta.migrated_from_cache_version {
+                            schema = format!("v{CACHE_VERSION} (migrated in memory from v{from}: this bundle was published by an older build of this MCP)");
+                        };
+                        let src_label: String = if let Some(p) = &cfg.rui_path {
+                            format!("built locally from rui_path ({})", p.display().to_string())
+                        } else {
+                            "prebuilt: no `bevy_rui` source tree present or required".to_string()
+                        };
+                        println!("  index schema   : {schema}");
+                        println!("  index source   : {src_label}");
+                        println!(
+                            "  index stats    : {} records, {} widgets: {}",
+                            loaded.meta.total_records,
+                            loaded.meta.widgets.len(),
+                            loaded.meta.widgets.join(", ")
+                        );
+                    },
+                    Err(e) => {
+                        println!("  index schema   : unreadable ({e})");
+                    }
+                }
             }
         }
 

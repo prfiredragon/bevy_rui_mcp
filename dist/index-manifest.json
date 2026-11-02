@@ -1,0 +1,11 @@
+{
+  "manifest_version": 1,
+  "rui_version": "0.1.7",
+  "asset": "bevy-rui-index-0.1.7.tar.gz",
+  "revision": 0,
+  "sha256": "d9b7af96d8a12cfaa73656d43ff1b1ae97c39eaef9e904ea9e7466ce4ef1f79d",
+  "cache_version": 2,
+  "size": 55637,
+  "total_records": 262,
+  "built_at": "1793578787"
+}

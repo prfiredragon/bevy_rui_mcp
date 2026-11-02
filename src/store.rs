@@ -27,6 +27,10 @@ pub struct RuiIndex {
     pub name_tokens: HashMap<String, Vec<usize>>,
     /// Inverted index over documentation/signature/field tokens (`token -> Vec<record_idx>`).
     pub doc_tokens: HashMap<String, Vec<usize>>,
+    /// Reverse doc-link graph: normalized link target (`norm_key`) -> `Vec<record_idx>` of records whose
+    /// `doc_links` mention it. `rui_api` uses it to report which indexed symbols reference a lookup,
+    /// which makes the doc cross-references in `bevy_rui` verifiable instead of prose-only.
+    pub linked_by: HashMap<String, Vec<usize>>,
 }
 
 pub fn norm_key(s: &str) -> String {
@@ -130,6 +134,9 @@ impl RuiIndex {
         let mut doc_tokens: HashMap<String, Vec<usize>> = HashMap::new();
         let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
         let mut widgets_set: BTreeSet<String> = BTreeSet::new();
+        let mut linked_by: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut total_doc_links: usize = 0;
+        let mut total_implements: usize = 0;
 
         for (idx, rec) in records.iter().enumerate() {
             *by_kind.entry(rec.kind.clone()).or_insert(0) += 1;
@@ -167,8 +174,20 @@ impl RuiIndex {
                 name_tokens.entry(tok).or_default().push(idx);
             }
 
-            // Index doc + signature + field tokens
+            // Index doc + signature + field tokens, plus the trait names and normalized doc-link
+            // targets so `rui_search` can find a type from a trait it implements (`plugin widget`)
+            // or from a symbol its documentation links to.
             let mut body = format!("{} {} {}", rec.signature, rec.docs, rec.module);
+            for t in &rec.implements {
+                body.push(' ');
+                body.push_str(t);
+            }
+            for l in &rec.doc_links {
+                body.push(' ');
+                body.push_str(l);
+            }
+            total_doc_links += rec.doc_links.len();
+            total_implements += rec.implements.len();
             for f in &rec.fields {
                 body.push(' ');
                 body.push_str(&f.name);
@@ -183,12 +202,20 @@ impl RuiIndex {
             for tok in d_toks {
                 doc_tokens.entry(tok).or_default().push(idx);
             }
+
+            // Reverse doc-link edges: `linked_by[normalized_target]` collects the records whose
+            // documentation links to that target, so `rui_api` can answer "what references this?".
+            for target in &rec.doc_links {
+                linked_by.entry(norm_key(target)).or_default().push(idx);
+            }
         }
 
         meta.total_records = records.len();
         meta.total_symbols = symbols.len();
         meta.by_kind = by_kind;
         meta.widgets = widgets_set.into_iter().collect();
+        meta.total_doc_links = total_doc_links;
+        meta.total_implements = total_implements;
 
         Self {
             records,
@@ -196,6 +223,7 @@ impl RuiIndex {
             symbols,
             name_tokens,
             doc_tokens,
+            linked_by,
         }
     }
 
@@ -234,12 +262,17 @@ impl RuiIndex {
         limit: usize,
     ) -> Vec<SearchHit<'_>> {
         let mut scores: HashMap<usize, f64> = HashMap::new();
+        // Track which field produced the score so the formatter can explain the ranking.
+        let mut hit_symbol: HashMap<usize, bool> = HashMap::new();
+        let mut hit_name: HashMap<usize, bool> = HashMap::new();
+        let mut hit_doc: HashMap<usize, bool> = HashMap::new();
 
         // 1. Exact symbol match boost
         let q_key = norm_key(query);
         if let Some(exact_indices) = self.symbols.get(&q_key) {
             for &idx in exact_indices {
                 *scores.entry(idx).or_insert(0.0) += 100.0;
+                hit_symbol.insert(idx, true);
             }
         }
 
@@ -249,6 +282,7 @@ impl RuiIndex {
             if let Some(name_hits) = self.name_tokens.get(tok) {
                 for &idx in name_hits {
                     *scores.entry(idx).or_insert(0.0) += 18.0;
+                    hit_name.insert(idx, true);
                 }
             }
             // Prefix match on name tokens
@@ -257,6 +291,7 @@ impl RuiIndex {
                     if n_tok != tok && (n_tok.starts_with(tok) || tok.starts_with(n_tok)) {
                         for &idx in indices {
                             *scores.entry(idx).or_insert(0.0) += 8.0;
+                            hit_name.insert(idx, true);
                         }
                     }
                 }
@@ -264,6 +299,7 @@ impl RuiIndex {
             if let Some(doc_hits) = self.doc_tokens.get(tok) {
                 for &idx in doc_hits {
                     *scores.entry(idx).or_insert(0.0) += 4.0;
+                    hit_doc.insert(idx, true);
                 }
             }
         }
@@ -291,9 +327,23 @@ impl RuiIndex {
                     "example" => 0.95,
                     _ => 0.85,
                 };
+                let from_symbol = hit_symbol.contains_key(&idx);
+                let from_name = hit_name.contains_key(&idx);
+                let from_doc = hit_doc.contains_key(&idx);
+                let reason = match (from_symbol, from_name, from_doc) {
+                    (true, true, true) => "exact symbol + name + docs".to_string(),
+                    (true, true, false) => "exact symbol + name".to_string(),
+                    (true, false, true) => "exact symbol + docs".to_string(),
+                    (true, false, false) => "exact symbol".to_string(),
+                    (false, true, true) => "name + docs".to_string(),
+                    (false, true, false) => "name".to_string(),
+                    (false, false, true) => "docs".to_string(),
+                    (false, false, false) => "kind".to_string(),
+                };
                 Some(SearchHit {
                     record: rec,
                     score: raw_score * weight,
+                    reason,
                 })
             })
             .collect();
@@ -346,6 +396,133 @@ impl RuiIndex {
             })
             .collect()
     }
+
+    /// The `kind` values actually present in this index, ordered for display in tool schemas.
+    pub fn valid_kinds(&self) -> Vec<String> {
+        let out: Vec<String> = self.meta.by_kind.keys().cloned().collect();
+        out
+    }
+
+    /// Returns records closely related to `rec`: its owner's methods, siblings in the same module/widget,
+    /// and records that reference it by name or field. Ordered by relation strength, then by `kind_rank`.
+    pub fn related_records(&self, rec: &RuiRecord, limit: usize) -> Vec<&RuiRecord> {
+        let name_key = norm_key(&rec.name);
+        let scored: Vec<(usize, usize, &RuiRecord)> = self
+            .records
+            .iter()
+            .map(|other| {
+                if other.id == rec.id {
+                    return (0usize, 0usize, other);
+                }
+                let rel = relation_score(rec, other, &name_key);
+                (rel, kind_rank(&other.kind), other)
+            })
+            .filter(|t| t.0 > 0)
+            .collect();
+        let mut out: Vec<(usize, usize, &RuiRecord)> = scored;
+        out.sort_by(|a, b| {
+            b.0
+                .cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.name.cmp(&b.2.name))
+        });
+        out.truncate(limit);
+        let mut result: Vec<&RuiRecord> = Vec::new();
+        for tuple in out {
+            result.push(tuple.2);
+        }
+        result
+    }
+
+    /// Records whose documentation links to this record (reverse `linked_by` edges), ranked by how
+    /// many distinct normalized keys of `rec` they link to, then by `kind_rank`. This is the only
+    /// place the doc cross-reference graph is observable, so `rui_api` can state "referenced by"
+    /// facts that trace back to actual `[...]` links in `bevy_rui` doc comments.
+    pub fn referencing_records(&self, rec: &RuiRecord, limit: usize) -> Vec<&RuiRecord> {
+        let mut keys: Vec<String> = vec![
+            norm_key(&rec.name),
+            norm_key(&rec.full_path),
+        ];
+        if rec.full_path.starts_with("bevy_rui::") {
+            let stripped: Vec<String> = vec![
+                rec.full_path.strip_prefix("bevy_rui::").unwrap_or("").to_string(),
+                rec.full_path.strip_prefix("bevy_rui::widgets::").unwrap_or("").to_string(),
+            ];
+            keys.extend(stripped.iter().map(|s| norm_key(s)));
+        }
+        if let Some(owner) = &rec.owner {
+            keys.push(norm_key(&format!("{owner}::{}", rec.name)));
+        }
+        keys.sort();
+        keys.dedup();
+
+        // Count, per record, how many of this record's alias keys some other record links to.
+        let mut hits: HashMap<usize, usize> = HashMap::new();
+        for k in &keys {
+            if k.is_empty() {
+                continue;
+            }
+            if let Some(indices) = self.linked_by.get(k) {
+                for i in indices.iter() {
+                    *hits.entry(*i).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut scored: Vec<(usize, usize, usize, &RuiRecord)> = Vec::new();
+        for (i, strength) in hits.iter() {
+            let other = &self.records[*i];
+            if other.id == rec.id {
+                continue;
+            }
+            scored.push((*strength, kind_rank(&other.kind), *i, other));
+        }
+        scored.sort_by(|a, b| {
+            b.0
+                .cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        scored.truncate(limit);
+        scored.iter().map(|t| t.3).collect()
+    }
+
+    /// Close indexed record names for a mistyped `symbol`, ranked by bounded Levenshtein distance.
+    pub fn suggest_symbols(&self, symbol: &str, limit: usize) -> Vec<String> {
+        let key = norm_key(symbol);
+        if key.is_empty() {
+            return Vec::new();
+        }
+        let key_len = key.chars().count();
+        let max_dist = if key_len <= 3 { 1 } else if key_len <= 6 { 2 } else { 3 };
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for rec in &self.records {
+            names.insert(rec.name.clone());
+        }
+        let mut matches: Vec<(usize, String)> = Vec::new();
+        for name in &names {
+            let cand = norm_key(name);
+            if cand == key {
+                continue;
+            }
+            let cand_len = cand.chars().count();
+            if cand_len + max_dist < key_len || cand_len.saturating_sub(max_dist) > key_len {
+                continue;
+            }
+            let dist = levenshtein_bounded(&cand, &key, max_dist);
+            if dist > max_dist {
+                continue;
+            }
+            matches.push((dist, name.clone()));
+        }
+        matches.sort_by(|a, b| {
+            a.0
+                .cmp(&b.0)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        matches.truncate(limit);
+        matches.iter().map(|(_, name)| name.clone()).collect()
+    }
 }
 
 fn kind_rank(kind: &str) -> usize {
@@ -360,6 +537,102 @@ fn kind_rank(kind: &str) -> usize {
         "example" => 7,
         _ => 8,
     }
+}
+
+/// Relation strength between two records: shared owner, shared widget, shared module, and name/field references.
+fn relation_score(rec: &RuiRecord, other: &RuiRecord, name_key: &str) -> usize {
+    let mut rel = 0usize;
+    if let Some(owner) = &other.owner {
+        if *owner == rec.name {
+            rel += 6;
+        }
+    }
+    if let Some(owner) = &rec.owner {
+        if other.name == *owner {
+            rel += 6;
+        }
+    }
+    if let Some(w) = &rec.widget {
+        if let Some(ow) = &other.widget {
+            if ow == w {
+                rel += 3;
+            }
+        }
+    }
+    if other.module == rec.module {
+        rel += 2;
+    }
+    if name_key.len() >= 3 {
+        if norm_key(&other.full_path).contains(name_key) {
+            rel += 2;
+        }
+        if other.fields.iter().any(|f| norm_key(&f.name) == name_key) {
+            rel += 2;
+        }
+    }
+    if other.file == rec.file {
+        rel += 1;
+    }
+    // Doc-link edges follow in both directions: a record that links to this one, or one this one
+    // links to, is a genuine cross-reference rather than an accidental token overlap.
+    for target in &rec.doc_links {
+        if norm_key(target) == name_key || norm_key(target) == norm_key(&other.name) {
+            rel += 4;
+        }
+    }
+    for target in &other.doc_links {
+        if norm_key(target) == name_key {
+            rel += 4;
+        }
+    }
+    rel
+}
+
+/// Levenshtein edit distance between `a` and `b`, short-circuiting to `max + 1` once the distance exceeds `max`.
+pub fn levenshtein_bounded(a: &str, b: &str, max: usize) -> usize {
+    let ac: Vec<char> = a.chars().collect();
+    let bc: Vec<char> = b.chars().collect();
+    if ac.is_empty() {
+        return bc.len();
+    }
+    if bc.is_empty() {
+        return ac.len();
+    }
+    let columns = bc.len() + 1;
+    let mut prev: Vec<usize> = Vec::new();
+    for i in 0..columns {
+        prev.push(i);
+    }
+    let mut cur: Vec<usize> = Vec::new();
+    for row in 1..=ac.len() {
+        cur.clear();
+        cur.push(row);
+        let mut row_min = row;
+        for col in 1..columns {
+            let cost = if ac[row - 1] == bc[col - 1] { 0 } else { 1 };
+            let deletion = prev[col] + 1;
+            let insertion = cur[col - 1] + 1;
+            let substitution = prev[col - 1] + cost;
+            let mut best = deletion;
+            if insertion < best {
+                best = insertion;
+            }
+            if substitution < best {
+                best = substitution;
+            }
+            cur.push(best);
+            if best < row_min {
+                row_min = best;
+            }
+        }
+        if row_min > max {
+            return max + 1;
+        }
+        for i in 0..columns {
+            prev[i] = cur[i];
+        }
+    }
+    prev[bc.len()]
 }
 
 /// Returns the version directory path inside `data_dir` (`<data_dir>/versions/<version>`).
@@ -412,7 +685,14 @@ pub fn save_index_to_disk(data_dir: &Path, index: &RuiIndex) -> Result<PathBuf, 
     }
 
     let meta_path = v_dir.join("meta.json");
-    let meta_json = serde_json::to_string_pretty(&index.meta).map_err(|e| e.to_string())?;
+    // Persisted metadata is deliberately path-free: `rui_path` is a machine-local absolute path
+    // (whose checkout happened to build this index), it means nothing on another machine, and the
+    // persisted index is committed into this repo and repacked into release bundles, so keeping it
+    // would bake one developer's project location into data every consumer downloads. Freshness comes
+    // from `fingerprint` compared against `cfg.rui_path`, never from this field.
+    let mut disk_meta = index.meta.clone();
+    disk_meta.rui_path = None;
+    let meta_json = serde_json::to_string_pretty(&disk_meta).map_err(|e| e.to_string())?;
     fs::write(&meta_path, meta_json).map_err(|e| e.to_string())?;
 
     let mut reg = read_registry(data_dir);
@@ -426,7 +706,9 @@ pub fn save_index_to_disk(data_dir: &Path, index: &RuiIndex) -> Result<PathBuf, 
             records: index.meta.total_records,
             symbols: index.meta.total_symbols,
             widgets: index.meta.widgets.clone(),
-            rui_path: index.meta.rui_path.clone(),
+            // Same reason as `meta.json`: the registry is committed/shipped, so it never stores a
+            // machine-local source path. The version, counts and fingerprint identify the index.
+            rui_path: None,
             asset: None,
             revision: None,
             sha256: None,
@@ -451,13 +733,25 @@ pub fn load_index_from_disk(data_dir: &Path, version: &str) -> Result<RuiIndex, 
     }
 
     let meta_text = fs::read_to_string(&meta_path).map_err(|e| e.to_string())?;
-    let meta: IndexMetadata = serde_json::from_str(&meta_text).map_err(|e| e.to_string())?;
+    let mut meta: IndexMetadata = serde_json::from_str(&meta_text).map_err(|e| e.to_string())?;
     if meta.cache_version != CACHE_VERSION {
-        return Err(format!(
-            "Persisted index cache version mismatch (found v{}, expected v{})",
-            meta.cache_version, CACHE_VERSION
-        ));
+        if meta.cache_version == 0 || meta.cache_version > CACHE_VERSION {
+            return Err(format!(
+                "Persisted index cache version v{} is invalid or newer than current v{}",
+                meta.cache_version,
+                CACHE_VERSION,
+            ))
+        }
+        // Older schemas are readable rather than rejected: each field added by a later schema
+        // version carries a serde default, so an older `meta.json` + `records.ndjson` pair still
+        // deserializes. Upgrade it in memory instead of failing, because a prebuilt index
+        // downloaded from a GitHub Release may have been published by an older build of this MCP,
+        // and refusing to load it would orphan every already-published bundle (which is exactly
+        // what a cache-version bump did to v1 bundles before). The origin is recorded so `rui_status`
+        // can report the schema the bundle really came from.
+        meta.migrated_from_cache_version = Some(meta.cache_version)
     }
+    meta.cache_version = CACHE_VERSION;
 
     let file = File::open(&records_path).map_err(|e| e.to_string())?;
     let reader = BufReader::new(file);
@@ -511,6 +805,9 @@ pub fn load_or_build_index(cfg: &ResolvedConfig, force: bool) -> Result<RuiIndex
             total_symbols: 0,
             widgets: Vec::new(),
             by_kind: BTreeMap::new(),
+            total_doc_links: 0,
+            total_implements: 0,
+            migrated_from_cache_version: None,
         };
         let index = RuiIndex::from_records(records, meta);
         let _ = save_index_to_disk(&cfg.data_dir, &index);
@@ -550,23 +847,43 @@ pub fn publish_index_bundle(
         format!("bevy-rui-index-{ver}.tar.gz")
     };
     let bundle_path = out_dir.join(&bundle_name);
+    // Normalized `meta.json` staged here only to be packed into the tar, then deleted.
+    let dist_meta_path = out_dir.join(".bevy-rui-index-meta-dist.json");
 
     {
         let tar_gz = File::create(&bundle_path).map_err(|e| e.to_string())?;
         let enc = GzEncoder::new(tar_gz, Compression::default());
         let mut tar = tar::Builder::new(enc);
 
+        // Ship a normalized copy of `meta.json` under the `versions/<ver>/meta.json` name: `rui_path`
+        // is a machine-local absolute path (the checkout this index happened to be built from)
+        // that means nothing on the consumer's machine and would bake one developer's project
+        // location into distributed data, so a downloaded bundle carries no source path at all. A
+        // migration marker inherited from an older republished index is dropped too, since this
+        // publication is schema-current.
+        {
+            let mut dist_meta = index.meta.clone();
+            dist_meta.rui_path = None;
+            dist_meta.migrated_from_cache_version = None;
+            let dist_json = serde_json::to_string_pretty(&dist_meta).map_err(|e| e.to_string())?;
+            fs::write(&dist_meta_path, dist_json).map_err(|e| e.to_string())?;
+        }
         tar.append_path_with_name(
             v_dir.join("records.ndjson"),
             format!("versions/{ver}/records.ndjson"),
         )
         .map_err(|e| e.to_string())?;
         tar.append_path_with_name(
-            v_dir.join("meta.json"),
+            &dist_meta_path,
             format!("versions/{ver}/meta.json"),
         )
         .map_err(|e| e.to_string())?;
         tar.finish().map_err(|e| e.to_string())?;
+    }
+
+    // The normalized meta copy only exists to be packed into the tar; drop it from `dist/`.
+    if dist_meta_path.is_file() {
+        let _ = fs::remove_file(&dist_meta_path);
     }
 
     let bytes = fs::read(&bundle_path).map_err(|e| e.to_string())?;
@@ -683,6 +1000,12 @@ pub fn fetch_index_bundle(
         },
     );
     write_registry(&cfg.data_dir, &reg)?;
+
+    // Persist the normalized current-schema copy (migration marker included) so later loads are
+    // schema-clean and `rui_status` reports where an older bundle came from.
+    if loaded.meta.migrated_from_cache_version.is_some() {
+        let _ = save_index_to_disk(&cfg.data_dir, &loaded)?;
+    }
 
     Ok(target_v_dir)
 }

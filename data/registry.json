@@ -1,0 +1,38 @@
+{
+  "cache_version": 2,
+  "versions": {
+    "0.1.7": {
+      "version": "0.1.7",
+      "cache_version": 2,
+      "built_at": "1793578787",
+      "records": 262,
+      "symbols": 910,
+      "widgets": [
+        "accordion",
+        "button",
+        "canvas_layer",
+        "checkbox",
+        "clipboard",
+        "code_editor",
+        "color_picker",
+        "context_menu",
+        "debug_colors",
+        "docks",
+        "dropdown",
+        "file_dialog",
+        "label",
+        "layout",
+        "menu",
+        "progress_bar",
+        "resizer",
+        "scrollview",
+        "slider",
+        "tabs",
+        "textbox",
+        "tooltip",
+        "viewport",
+        "windows"
+      ]
+    }
+  }
+}
