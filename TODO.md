@@ -116,8 +116,16 @@ Every step below ran against the real `bevy_rui` 0.1.7 checkout, then against a 
    migrated cleanly (`index schema v2 (migrated in memory from v1: ...)`) instead of erroring.
 9. `git grep` for the old author path over the tracked tree (including `data/` and `dist/`): **no matches**.
 
+## Release published (done)
+`https://github.com/prfiredragon/bevy_rui_mcp/releases/tag/v0.1.7` carries both artifacts
+(`bevy-rui-index-0.1.7.tar.gz` 55,637 B + `index-manifest.json` 283 B), anchored on annotated tag
+`v0.1.7`. Verified live: the tool's URL pattern
+`https://github.com/<repo>/releases/download/v<ver>/bevy-rui-index-<ver>.tar.gz` returns 200, and a
+**fresh** data dir (`fetch-index --repo … --version 0.1.7 --data-dir /tmp/machine-sim/data`, no
+source tree, no config) installs 262 records and serves all 6 tools + 34 resources. Local tarball
+sha256 `d9b7af96…` matches the published manifest.
+
 ## Outstanding (discovered while implementing, not in the original list)
-- [ ] Upload `dist/bevy-rui-index-0.1.7.tar.gz` + `dist/index-manifest.json` as assets of a GitHub
       Release tagged **`v0.1.7`** on `prfiredragon/bevy_rui_mcp` (needs `gh`/web upload; no `gh` CLI
       installed here). Until then `fetch-index --repo` 404s; the `--from`/`--url` path already works.
 - [ ] Add a test layer: unit tests for the fallback chain (checkout present / absent / sibling dir),
